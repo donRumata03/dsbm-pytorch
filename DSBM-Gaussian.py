@@ -653,7 +653,7 @@ def train(cfg: DictConfig):
   return {}, {}
 
 
-@hydra.main(config_path="conf", config_name="gaussian.yaml", version_base=None)
+@hydra.main(config_path="conf", config_name="gaussian.yaml", version_base="1.1")
 def main(cfg: DictConfig) -> Optional[float]:
     # train the model
     train(cfg)

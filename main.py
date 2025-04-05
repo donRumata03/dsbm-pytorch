@@ -2,7 +2,7 @@ import os
 import hydra
 
 
-@hydra.main(config_path="conf", config_name="config", version_base=None)
+@hydra.main(config_path="conf", config_name="config", version_base="1.1")
 def main(cfg):
     if cfg.Method == "DSB":
         from run_dsb import run
