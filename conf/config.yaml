@@ -16,7 +16,7 @@ use_default_wandb_name: False
 wandb_id: null # leave as null for wandb to assign this
 
 # logging
-LOGGER: Wandb  # CSV
+LOGGER: CSV # Wandb
 CSV_log_dir: ./
 
 # training

@@ -17,7 +17,7 @@ import pytorch_lightning as pl
 from omegaconf import DictConfig
 
 
-device = 'cpu'
+device = 'cuda'
 dataset_size = 10000
 test_dataset_size = 10000
 lr = 1e-4

@@ -229,12 +229,22 @@ class IPF_DBDSB:
                     self.update_ema('b')
                     self.ema_helpers['b'].register(sample_net_b)
 
+    @staticmethod
+    def worker_init_fn(worker_id, base_seed):
+        seed = np.random.get_state()[1][0] + worker_id + base_seed
+        np.random.seed(seed)
+
     def build_dataloader(self, ds, batch_size, shuffle=True, drop_last=True, repeat=True):
-        def worker_init_fn(worker_id):
-            np.random.seed(np.random.get_state()[1][0] + worker_id + self.accelerator.process_index * self.args.num_workers)
-        dl_kwargs = {"num_workers": self.args.num_workers,
-                     "pin_memory": self.args.pin_memory,
-                     "worker_init_fn": worker_init_fn}
+        base_seed = self.accelerator.process_index * self.args.num_workers
+
+        # Create a partial function to supply base_seed
+        worker_fn = partial(IPF_DBDSB.worker_init_fn, base_seed=base_seed)
+
+        dl_kwargs = {
+            "num_workers": self.args.num_workers,
+            "pin_memory": self.args.pin_memory,
+            "worker_init_fn": worker_fn
+        }
 
         dl = DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last, **dl_kwargs)
         dl = self.accelerator.prepare(dl)
