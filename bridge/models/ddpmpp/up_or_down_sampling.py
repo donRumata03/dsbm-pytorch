@@ -10,6 +10,10 @@ import numpy as np
 try:
     from .op import upfirdn2d
 except:
+    from traceback import print_exc
+    print_exc()
+    import os
+    print(os.environ.get("PATH"))
     print('Failed to import upfirdn2d')
 
 

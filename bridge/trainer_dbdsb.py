@@ -168,9 +168,9 @@ class IPF_DBDSB:
         if self.first_pass and self.resume:
             if self.resume_f:
                 try:
-                    net_f.load_state_dict(torch.load(self.checkpoint_f))
+                    net_f.load_state_dict(torch.load(self.checkpoint_f, weights_only=False))
                 except:
-                    state_dict = torch.load(self.checkpoint_f)
+                    state_dict = torch.load(self.checkpoint_f, weights_only=False)
                     new_state_dict = OrderedDict()
                     for k, v in state_dict.items():
                         name = k.replace("module.", "")  # remove "module."
@@ -179,9 +179,9 @@ class IPF_DBDSB:
 
             if self.resume:
                 try:
-                    net_b.load_state_dict(torch.load(self.checkpoint_b))
+                    net_b.load_state_dict(torch.load(self.checkpoint_b, weights_only=False))
                 except:
-                    state_dict = torch.load(self.checkpoint_b)
+                    state_dict = torch.load(self.checkpoint_b, weights_only=False)
                     new_state_dict = OrderedDict()
                     for k, v in state_dict.items():
                         name = k.replace("module.", "")  # remove "module."
@@ -218,13 +218,13 @@ class IPF_DBDSB:
 
                 if self.resume_f:
                     sample_net_f.load_state_dict(
-                        torch.load(self.sample_checkpoint_f))
+                        torch.load(self.sample_checkpoint_f, weights_only=False))
                     sample_net_f = sample_net_f.to(self.device)
                     self.update_ema('f')
                     self.ema_helpers['f'].register(sample_net_f)
                 if self.resume:
                     sample_net_b.load_state_dict(
-                        torch.load(self.sample_checkpoint_b))
+                        torch.load(self.sample_checkpoint_b, weights_only=False))
                     sample_net_b = sample_net_b.to(self.device)
                     self.update_ema('b')
                     self.ema_helpers['b'].register(sample_net_b)
@@ -483,9 +483,9 @@ class IPF_DBDSB:
 
         if self.first_pass and self.resume:
             if self.resume_f:
-                optimizer_f.load_state_dict(torch.load(self.optimizer_checkpoint_f))
+                optimizer_f.load_state_dict(torch.load(self.optimizer_checkpoint_f, weights_only=False))
             if self.resume:
-                optimizer_b.load_state_dict(torch.load(self.optimizer_checkpoint_b))
+                optimizer_b.load_state_dict(torch.load(self.optimizer_checkpoint_b, weights_only=False))
 
         if forward_or_backward is None:
             self.optimizer = {'f': optimizer_f, 'b': optimizer_b}
