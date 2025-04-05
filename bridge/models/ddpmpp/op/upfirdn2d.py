@@ -13,6 +13,8 @@ upfirdn2d_op = load(
         os.path.join(module_path, "upfirdn2d.cpp"),
         os.path.join(module_path, "upfirdn2d_kernel.cu"),
     ],
+    extra_cuda_cflags=["-allow-unsupported-compiler"],
+    # verbose=True
 )
 
 
@@ -143,7 +145,7 @@ class UpFirDn2d(Function):
 
 
 def upfirdn2d(input, kernel, up=1, down=1, pad=(0, 0)):
-    if input.device.type == "cpu":
+    if input.device.type == "cpu":  # workaround: just put True unconditionally
         out = upfirdn2d_native(
             input, kernel, up, up, down, down, pad[0], pad[1], pad[0], pad[1]
         )
