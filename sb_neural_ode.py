@@ -11,7 +11,10 @@ epochs = 100
 batch_size = 1024
 hidden = 128
 lr = 1e-3
+
+# energy_reg = 0
 energy_reg = 5e-4  # λ * ∫‖f‖²dt
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 ckpt_path = Path('shoot_only_best.pt')
 # -------------------------------------------------
@@ -95,8 +98,8 @@ class DriftNet(nn.Module):
 
 fθ = DriftNet(d, hidden).to(device)
 last = fθ.net[-1]  # final Linear
-last.weight.data.zero_()
-last.bias.data.copy_(torch.tensor(b, dtype=torch.float32))  # b from lstsq
+# last.weight.data.zero_()
+# last.bias.data.copy_(torch.tensor(b, dtype=torch.float32))  # b from lstsq
 
 
 class ODEFunc(nn.Module):
