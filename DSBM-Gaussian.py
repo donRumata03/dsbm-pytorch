@@ -1,3 +1,5 @@
+import math
+
 import torch
 import numpy as np
 import pandas as pd
@@ -15,6 +17,12 @@ from typing import List, Optional, Tuple
 import hydra
 import pytorch_lightning as pl
 from omegaconf import DictConfig
+
+# --- Neural-ODE ----------------------------------------------------
+from torchdiffeq import odeint_adjoint as odeint
+from sb_neural_ode import DriftNet, ODEFunc
+
+# ------------------------------------------------------------------
 
 
 device = 'cuda'
@@ -265,6 +273,28 @@ class DSBM(nn.Module):
       traj.append(z.detach().clone())
 
     return traj
+
+  def load_neural_ode(self, ckpt=r'C:\dev\aim\dsbm-pytorch\shoot_only_best.pt'):
+    """Call once *after* the ckpt has been trained."""
+    ck = torch.load(ckpt, map_location=device)
+    d = ck['state']['net.0.weight'].shape[1] - 17   # 1(t)+16 fourier
+    self.neural_drift = DriftNet(d).to(device)
+    self.neural_drift.load_state_dict(ck['state'])
+    self.mu = torch.tensor(ck['mu'], device=device, dtype=torch.float32)
+    self.std = torch.tensor(ck['std'], device=device, dtype=torch.float32)
+
+  @torch.no_grad()
+  def sample_neuralode(self, zstart, N=64):           # deterministic flow
+    assert hasattr(self, 'neural_drift'), "call .load_neural_ode() first"
+    ts = torch.tensor([0., 1.], device=zstart.device)
+    x0_n = (zstart - self.mu) / self.std
+    y1_n = odeint(
+      ODEFunc(self.neural_drift, zstart.shape[1]).to(zstart.device),
+      x0_n.view(-1), ts, method='rk4', options=dict(step_size=1. / N)
+    )[-1].view_as(zstart)
+    return [zstart, y1_n * self.std + self.mu]      # length-2 trajectory
+
+
 
 
 def train_dsbm(dsbm_ipf, x_pairs, batch_size, inner_iters, prev_model=None, fb='', first_it=False):
@@ -561,7 +591,56 @@ def train(cfg: DictConfig):
         prev_model = model_list[-1]["model"].eval()
       model, loss_curve = train_fn(model, x_pairs, batch_size, inner_iters, prev_model=prev_model, fb=fb, first_it=first_it)
       model_list.append({'fb': fb, 'model': copy.deepcopy(model).eval()})
-    
+
+      if fb == 'f' and (it == 1):          # train once after first IPF round
+        print('⟨Neural-ODE⟩ training …')
+        # os.system('python sb_neural_ode_shoot.py')
+        model.load_neural_ode()
+      if hasattr(model, "sample_neuralode"):
+        model.load_neural_ode()
+        traj_ode = model.sample_neuralode(zstart=x_test_dict[fb])
+        draw_plot(lambda **kw: traj_ode, z0=x_test_dict['f'], z1=x_test_dict['b'])
+        plt.savefig(f"{it}-{fb}-neuralode.png"); plt.close()
+
+      if hasattr(model, "sample_sde") and hasattr(model, "sample_neuralode"):
+        print("\n=== Metrics for SB vs. NeuralODE ===")
+        # 1. Forward SB (stochastic)
+        sb_traj = model.sample_sde(zstart=x0_test, fb='f')
+        sb_final = sb_traj[-1].cpu()
+        # 2. Neural ODE (deterministic)
+        ne_traj = model.sample_neuralode(zstart=x0_test)
+        ne_final = ne_traj[-1].cpu()
+        # 3. Target
+        tgt = x1_test.cpu()
+
+        # Metrics: mean, variance, covariance diagonal
+        def get_stats(arr):
+          # arr: (N, d)
+          mean = arr.mean(0)
+          var = arr.var(0)
+          cov_diag = torch.cov(arr.T).diag() if arr.shape[0] > 1 else torch.zeros_like(mean)
+          return mean, var, cov_diag
+
+        m_sb, v_sb, c_sb = get_stats(sb_final)
+        m_ne, v_ne, c_ne = get_stats(ne_final)
+        m_tg, v_tg, c_tg = get_stats(tgt)
+
+        print("  Mean    (SB):", m_sb.numpy())
+        print("  Mean    (N-ODE):", m_ne.numpy())
+        print("  Mean    (Target):", m_tg.numpy())
+        print("  Var     (SB):", v_sb.numpy())
+        print("  Var     (N-ODE):", v_ne.numpy())
+        print("  Var     (Target):", v_tg.numpy())
+        print("  CovDiag (SB):", c_sb.numpy())
+        print("  CovDiag (N-ODE):", c_ne.numpy())
+        print("  CovDiag (Target):", c_tg.numpy())
+
+        # Optionally, print errors
+        print("\n  |Mean diff| (SB):", torch.abs(m_sb - m_tg).mean().item())
+        print("  |Mean diff| (N-ODE):", torch.abs(m_ne - m_tg).mean().item())
+        print("  |Var diff|  (SB):", torch.abs(v_sb - v_tg).mean().item())
+        print("  |Var diff|  (N-ODE):", torch.abs(v_ne - v_tg).mean().item())
+
       if hasattr(model, "sample_sde"):
         draw_plot(partial(model.sample_sde, zstart=x_test_dict[fb], fb=fb, first_it=first_it), z0=x_test_dict['f'], z1=x_test_dict['b'])
         plt.savefig(f"{it}-{fb}.png")

@@ -14,8 +14,9 @@ from pathlib import Path
 # ------------------------------------------------------------------
 # hyper-parameters
 # file = "experiments/gaussian/dim=5,inner_iters=10000,model_name=dsb/1/traj.npy"
-file = "sb_trajectories.npy"
-epochs = 100
+file = r"C:\dev\aim\dsbm-pytorch\experiments\gaussian\dim=5,inner_iters=2000,model_name=dsbm\1\traj.npy"
+# file = "sb_trajectories.npy"
+epochs = 20
 batch_size = 1024
 hidden = 128
 lr = 1e-3
@@ -77,7 +78,7 @@ print(f'Baseline MSE (affine)          : {mse_aff:.6f}')
 
 # --------------------------- 2. model ------------------------------
 class DriftNet(nn.Module):
-    def __init__(self, d, width=256, depth=4):
+    def __init__(self, d, width=128, depth=4):
         super().__init__()
         # Fourier time-embedding
         self.freqs = 2 * torch.pi * torch.arange(1, 9)
@@ -182,6 +183,7 @@ for epoch in range(1, epochs + 1):
         print(f'  ↳ saved (best={best:.3e})')
 
 print('done, best val =', best)
+print(odefunc)
 
 # -------------------- 5. report (raw space) ------------------------
 sigma = (std if isinstance(std, np.ndarray) else std.cpu().numpy())
