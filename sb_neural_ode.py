@@ -21,6 +21,7 @@ batch_size = 1024
 hidden = 128
 lr = 1e-3
 energy_reg = 5e-4  # λ * ∫‖f‖²dt   (set 0 to disable)
+energy_reg = 5e-1  # λ * ∫‖f‖²dt   (set 0 to disable)
 match_known_traj = False
 # ------------------------------------------------------------------
 
@@ -193,3 +194,95 @@ rmse_dim = math.sqrt(mse_raw / d)
 
 print(f'Model MSE  (raw space)         : {mse_raw:.3f}')
 print(f'Model RMSE per dimension       : {rmse_dim:.3f}')
+
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+
+
+def straightness_ratio(traj):
+    # traj: (K+1, d)
+    segs = np.linalg.norm(np.diff(traj, axis=0), axis=1)
+    arc_len = np.sum(segs)
+    chord = np.linalg.norm(traj[0] - traj[-1])
+    return chord / arc_len if arc_len > 0 else 0.0
+
+if __name__ == '__main__':
+    # --- Visualization section ---
+    fθ.eval()
+
+    num_plot = min(8, len(val_set))
+    indices = np.random.choice(len(val_set), num_plot, replace=False)
+    fig, axes = plt.subplots(1, num_plot, figsize=(3*num_plot, 3))
+
+    for i, idx in enumerate(indices):
+        x0, x1, traj = val_set[idx]
+        x0 = x0.numpy()
+        x1 = x1.numpy()
+        gt_traj = traj.numpy()  # (K+1, d)
+        gt_traj_raw = gt_traj * std + mu
+
+        t_eval = torch.linspace(0, 1, K+1)
+        with torch.no_grad():
+            pred_traj = odeint(
+                odefunc,
+                torch.tensor(x0.reshape(-1), device=device),
+                t_eval.to(device),
+                method='rk4'
+            ).cpu().numpy().reshape(K+1, d)
+        pred_traj_raw = pred_traj * std + mu
+
+        # Only plot first two coordinates
+        colors = cm.plasma(np.linspace(0, 1, K+1))
+        ax = axes[i] if num_plot > 1 else axes
+
+        # GT
+        ax.scatter(gt_traj_raw[:,0], gt_traj_raw[:,1], c=colors, s=18, label="GT", marker='o', alpha=0.8)
+        ax.plot(gt_traj_raw[:,0], gt_traj_raw[:,1], color='C0', lw=1, alpha=0.5)
+        # NeuralODE
+        ax.scatter(pred_traj_raw[:,0], pred_traj_raw[:,1], c=colors, s=18, label="NeuralODE", marker='x', alpha=0.8)
+        ax.plot(pred_traj_raw[:,0], pred_traj_raw[:,1], color='C1', lw=1, alpha=0.5)
+        # Chord
+        ax.plot([gt_traj_raw[0,0], gt_traj_raw[-1,0]], [gt_traj_raw[0,1], gt_traj_raw[-1,1]], ':', color='gray', lw=1)
+
+        # Straightness
+        gt_str = straightness_ratio(gt_traj_raw[:, :2])
+        pred_str = straightness_ratio(pred_traj_raw[:, :2])
+        ax.set_title(f"GT S={gt_str:.2f}\nODE S={pred_str:.2f}")
+        ax.set_xlabel("x1")
+        ax.set_ylabel("x2")
+        ax.set_aspect('equal')
+        ax.grid(True)
+        if i == 0:
+            # Show colorbar for time (only once)
+            sm = plt.cm.ScalarMappable(cmap=cm.plasma, norm=plt.Normalize(vmin=0, vmax=1))
+            cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label("Time")
+
+    plt.tight_layout()
+    plt.suptitle("Trajectories in (x1, x2): GT (o), NeuralODE (x), color=time", y=1.05)
+    plt.show()
+
+    # --- (Optional) print average straightness ---
+    # Compute on full val set:
+    gt_straightnesses = []
+    pred_straightnesses = []
+    for xb, x1b, trajb in val_loader:
+        xb = xb.cpu().numpy()
+        trajb = trajb.cpu().numpy()
+        for i in range(xb.shape[0]):
+            gt_traj = trajb[i] * std + mu
+            gt_straightnesses.append(straightness_ratio(gt_traj))
+            # Predict with ODE
+            with torch.no_grad():
+                pred_traj = odeint(
+                    odefunc,
+                    torch.tensor((xb[i]).reshape(-1), device=device),
+                    torch.linspace(0, 1, K+1).to(device),
+                    method='rk4'
+                ).cpu().numpy().reshape(K+1, d)
+            pred_traj_raw = pred_traj * std + mu
+            pred_straightnesses.append(straightness_ratio(pred_traj_raw))
+        print(f"Processed batch of size {xb.shape[0]}")
+        break
+
+    print(f"Mean straightness: GT = {np.mean(gt_straightnesses):.3f}, NeuralODE = {np.mean(pred_straightnesses):.3f}")
