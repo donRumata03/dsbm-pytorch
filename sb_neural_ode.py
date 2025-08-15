@@ -14,7 +14,8 @@ from pathlib import Path
 # ------------------------------------------------------------------
 
 # file = "experiments/gaussian/dim=5,inner_iters=10000,model_name=dsb/1/traj.npy"
-file = r"C:\dev\aim\dsbm-pytorch\experiments\gaussian\dim=5,inner_iters=2000,model_name=dsbm\1\traj.npy"
+# file = r"C:\dev\aim\dsbm-pytorch\experiments\gaussian\dim=5,inner_iters=2000,model_name=dsbm\1\traj.npy"
+file = r"C:\dev\aim\dsbm-pytorch\traj-maria.npy"
 # file = "sb_trajectories.npy"
 epochs = 20
 batch_size = 1024
@@ -22,7 +23,8 @@ hidden = 128
 lr = 1e-3
 energy_reg = 5e-4  # λ * ∫‖f‖²dt   (set 0 to disable)
 energy_reg = 5e-1  # λ * ∫‖f‖²dt   (set 0 to disable)
-match_known_traj = False
+energy_reg = 0  # λ * ∫‖f‖²dt   (set 0 to disable)
+match_known_traj = True
 # ------------------------------------------------------------------
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -39,6 +41,7 @@ x1 = traj[:, -1, :]
 
 # -------- feature normalisation (z-score) ----------------
 mu = x0.mean(0, keepdims=True)
+print("Raw x1 mean:", x1.mean())
 std = x0.std(0, keepdims=True) + 1e-8
 traj_n = (traj - mu) / std  # complete normalised trajectory
 x0_n = traj_n[:, 0, :]
@@ -71,6 +74,8 @@ val_loader = DataLoader(val_set, batch_size=batch_size * 2, shuffle=False)
 # Exact copy of x0
 mse_copy = np.mean((x1 - x0) ** 2)
 print(f'Baseline MSE (x̂₁ = x₀)         : {mse_copy:.6f}')
+
+# print("Real x1 mean:", x1.mean())
 
 # Linear transform
 X_aug = np.hstack([x0, np.ones((B, 1))])
@@ -197,6 +202,54 @@ rmse_dim = math.sqrt(mse_raw / d)
 print(f'Model MSE  (raw space)         : {mse_raw:.3f}')
 print(f'Model RMSE per dimension       : {rmse_dim:.3f}')
 
+
+# ———————————————————
+# --------- distribution statistics (raw space) ---------
+import numpy as np
+import torch
+
+# load best weights for evaluation
+ckpt = torch.load(ckpt_path, map_location=device)
+fθ.load_state_dict(ckpt['state'])
+fθ.eval()
+
+# integrate from x0 (normalized) to get predicted x1, then de-normalize to raw space
+with torch.no_grad():
+    x0n_all = torch.tensor(x0_n, dtype=torch.float32, device=device)
+    x1n_pred = odeint(
+        odefunc,
+        x0n_all.view(-1),
+        torch.tensor([0., 1.], device=device),
+        method='rk4',
+        options=dict(step_size=1. / K)
+    )[-1].view(-1, d)
+
+x1_pred = x1n_pred.cpu().numpy() * std + mu  # back to raw
+
+def compute_stats(X0, X1):
+    mean_x1 = X1.mean(axis=0)
+    var_x1 = X1.var(axis=0, ddof=1)
+    X0c = X0 - X0.mean(axis=0, keepdims=True)
+    X1c = X1 - X1.mean(axis=0, keepdims=True)
+    cov_x0x1 = (X0c.T @ X1c) / (X0.shape[0] - 1)
+    return mean_x1, var_x1, cov_x0x1
+
+m_true, v_true, cov_true = compute_stats(x0, x1)
+m_pred, v_pred, cov_pred = compute_stats(x0, x1_pred)
+
+np.set_printoptions(precision=6, suppress=True)
+print("Initial (true) distribution:")
+print("  mean[x1] =", m_true)
+print("  var[x1]  =", v_true)
+print("  Cov[x0, x1] =\n", cov_true)
+
+print("Resultant (NeuralODE) distribution:")
+print("  mean[x1_hat] =", m_pred)
+print("  var[x1_hat]  =", v_pred)
+print("  Cov[x0, x1_hat] =\n", cov_pred)
+
+# ————————————————————————
+
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
@@ -319,7 +372,7 @@ if __name__ == '__main__':
         Unbiased estimator of MMD² with mixture of RBF kernels.
         X, Y : (N,d) numpy arrays
         """
-        XX = torch.from_numpy(X);
+        XX = torch.from_numpy(X)
         YY = torch.from_numpy(Y)
         N, M = XX.size(0), YY.size(0)
         # pairwise ‖·‖²
