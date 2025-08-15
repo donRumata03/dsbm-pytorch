@@ -1,5 +1,3 @@
-# sb_neural_ode_shoot.py
-#
 # Train a neural ODE to shoot from x0 to x1.  With the toggle
 #    match_known_traj = True
 # the loss also forces the model to go through one *genuine* interior
@@ -12,7 +10,9 @@ from torchdiffeq import odeint_adjoint as odeint
 from pathlib import Path
 
 # ------------------------------------------------------------------
-# hyper-parameters
+# HyperParameters
+# ------------------------------------------------------------------
+
 # file = "experiments/gaussian/dim=5,inner_iters=10000,model_name=dsb/1/traj.npy"
 file = r"C:\dev\aim\dsbm-pytorch\experiments\gaussian\dim=5,inner_iters=2000,model_name=dsbm\1\traj.npy"
 # file = "sb_trajectories.npy"
@@ -28,7 +28,7 @@ match_known_traj = False
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 ckpt_path = Path('shoot_only_best.pt')
 
-# ---------------------- 1. load trajectories -----------------------
+# ---------------------- load trajectories -----------------------
 traj = np.load(file)  # (B, K+1, d)
 B, Kp1, d = traj.shape
 K = Kp1 - 1
@@ -37,7 +37,7 @@ print(f"Loaded {B} trajectories, each of length {Kp1} and dimension {d}")
 x0 = traj[:, 0, :]
 x1 = traj[:, -1, :]
 
-# -------- optional feature normalisation (z-score) ----------------
+# -------- feature normalisation (z-score) ----------------
 mu = x0.mean(0, keepdims=True)
 std = x0.std(0, keepdims=True) + 1e-8
 traj_n = (traj - mu) / std  # complete normalised trajectory
@@ -45,13 +45,13 @@ x0_n = traj_n[:, 0, :]
 x1_n = traj_n[:, -1, :]
 
 
-# dataset that also keeps the *whole* trajectory (needed when
-# match_known_traj == True)
+# dataset of (x0, x1, traj)
 class TrajDataset(torch.utils.data.Dataset):
     def __init__(self, x0, x1, traj_full):
         self.x0, self.x1, self.traj = x0, x1, traj_full
 
-    def __len__(self):  return len(self.x0)
+    def __len__(self):
+        return len(self.x0)
 
     def __getitem__(self, i):
         return self.x0[i], self.x1[i], self.traj[i]
@@ -66,10 +66,13 @@ train_set, val_set = random_split(dataset, [B - val_len, val_len])
 train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_set, batch_size=batch_size * 2, shuffle=False)
 
-# --------------------- baselines (raw space) -----------------------
+# --------------------- baselines (un-normalized space) -----------------------
+
+# Exact copy of x0
 mse_copy = np.mean((x1 - x0) ** 2)
 print(f'Baseline MSE (x̂₁ = x₀)         : {mse_copy:.6f}')
 
+# Linear transform
 X_aug = np.hstack([x0, np.ones((B, 1))])
 coeff, *_ = np.linalg.lstsq(X_aug, x1, rcond=None)
 A, b = coeff[:-1].T, coeff[-1]
@@ -77,7 +80,7 @@ mse_aff = np.mean(((x0 @ A.T + b) - x1) ** 2)
 print(f'Baseline MSE (affine)          : {mse_aff:.6f}')
 
 
-# --------------------------- 2. model ------------------------------
+# --------------------------- NeuralODE drift model ------------------------------
 class DriftNet(nn.Module):
     def __init__(self, d, width=128, depth=4):
         super().__init__()
@@ -101,7 +104,6 @@ class DriftNet(nn.Module):
 
 
 fθ = DriftNet(d, hidden).to(device)
-last = fθ.net[-1]  # for optional init
 
 
 class ODEFunc(nn.Module):
@@ -115,13 +117,13 @@ class ODEFunc(nn.Module):
 
 odefunc = ODEFunc(fθ, d).to(device)
 
-# -------------------- 3. optimiser & loss --------------------------
+# -------------------- optimiser & loss --------------------------
 opt = optim.AdamW(fθ.parameters(), lr=lr, betas=(0.9, 0.99), weight_decay=0.)
 mse = nn.MSELoss()
 best = 1e9
 val = None
 
-# ---------------------- 4. training loop ---------------------------
+# ---------------------- training loop ---------------------------
 for epoch in range(1, epochs + 1):
     fθ.train()
     running = 0.
@@ -145,7 +147,7 @@ for epoch in range(1, epochs + 1):
 
         loss_main = mse(x1_pred, x1b) + 0.2 * mse(x_tau_pred, x_tau_true)
 
-        # optional kinetic-energy regulariser
+        # kinetic-energy regulariser
         if energy_reg > 0 and val is not None and val < 0.5:
             T = len(t_eval)
             states = sol.view(T, -1, d)  # (T,B,d)
@@ -158,8 +160,8 @@ for epoch in range(1, epochs + 1):
         else:
             loss = loss_main
 
-        opt.zero_grad();
-        loss.backward();
+        opt.zero_grad()
+        loss.backward()
         opt.step()
         running += loss_main.item() * xb.size(0)
 
@@ -206,13 +208,14 @@ def straightness_ratio(traj):
     chord = np.linalg.norm(traj[0] - traj[-1])
     return chord / arc_len if arc_len > 0 else 0.0
 
+
 if __name__ == '__main__':
     # --- Visualization section ---
     fθ.eval()
 
     num_plot = min(8, len(val_set))
     indices = np.random.choice(len(val_set), num_plot, replace=False)
-    fig, axes = plt.subplots(1, num_plot, figsize=(3*num_plot, 3))
+    fig, axes = plt.subplots(1, num_plot, figsize=(3 * num_plot, 3))
 
     for i, idx in enumerate(indices):
         x0, x1, traj = val_set[idx]
@@ -221,28 +224,29 @@ if __name__ == '__main__':
         gt_traj = traj.numpy()  # (K+1, d)
         gt_traj_raw = gt_traj * std + mu
 
-        t_eval = torch.linspace(0, 1, K+1)
+        t_eval = torch.linspace(0, 1, K + 1)
         with torch.no_grad():
             pred_traj = odeint(
                 odefunc,
                 torch.tensor(x0.reshape(-1), device=device),
                 t_eval.to(device),
                 method='rk4'
-            ).cpu().numpy().reshape(K+1, d)
+            ).cpu().numpy().reshape(K + 1, d)
         pred_traj_raw = pred_traj * std + mu
 
         # Only plot first two coordinates
-        colors = cm.plasma(np.linspace(0, 1, K+1))
+        colors = cm.plasma(np.linspace(0, 1, K + 1))
         ax = axes[i] if num_plot > 1 else axes
 
         # GT
-        ax.scatter(gt_traj_raw[:,0], gt_traj_raw[:,1], c=colors, s=18, label="GT", marker='o', alpha=0.8)
-        ax.plot(gt_traj_raw[:,0], gt_traj_raw[:,1], color='C0', lw=1, alpha=0.5)
+        ax.scatter(gt_traj_raw[:, 0], gt_traj_raw[:, 1], c=colors, s=18, label="GT", marker='o', alpha=0.8)
+        ax.plot(gt_traj_raw[:, 0], gt_traj_raw[:, 1], color='C0', lw=1, alpha=0.5)
         # NeuralODE
-        ax.scatter(pred_traj_raw[:,0], pred_traj_raw[:,1], c=colors, s=18, label="NeuralODE", marker='x', alpha=0.8)
-        ax.plot(pred_traj_raw[:,0], pred_traj_raw[:,1], color='C1', lw=1, alpha=0.5)
+        ax.scatter(pred_traj_raw[:, 0], pred_traj_raw[:, 1], c=colors, s=18, label="NeuralODE", marker='x', alpha=0.8)
+        ax.plot(pred_traj_raw[:, 0], pred_traj_raw[:, 1], color='C1', lw=1, alpha=0.5)
         # Chord
-        ax.plot([gt_traj_raw[0,0], gt_traj_raw[-1,0]], [gt_traj_raw[0,1], gt_traj_raw[-1,1]], ':', color='gray', lw=1)
+        ax.plot([gt_traj_raw[0, 0], gt_traj_raw[-1, 0]], [gt_traj_raw[0, 1], gt_traj_raw[-1, 1]], ':', color='gray',
+                lw=1)
 
         # Straightness
         gt_str = straightness_ratio(gt_traj_raw[:, :2])
@@ -269,7 +273,7 @@ if __name__ == '__main__':
     for xb, x1b, trajb in val_loader:
         xb = xb.cpu().numpy()
         trajb = trajb.cpu().numpy()
-        for i in range(xb.shape[0]):
+        for i in range(min(xb.shape[0], 100)):
             gt_traj = trajb[i] * std + mu
             gt_straightnesses.append(straightness_ratio(gt_traj))
             # Predict with ODE
@@ -277,12 +281,124 @@ if __name__ == '__main__':
                 pred_traj = odeint(
                     odefunc,
                     torch.tensor((xb[i]).reshape(-1), device=device),
-                    torch.linspace(0, 1, K+1).to(device),
+                    torch.linspace(0, 1, K + 1).to(device),
                     method='rk4'
-                ).cpu().numpy().reshape(K+1, d)
+                ).cpu().numpy().reshape(K + 1, d)
             pred_traj_raw = pred_traj * std + mu
             pred_straightnesses.append(straightness_ratio(pred_traj_raw))
         print(f"Processed batch of size {xb.shape[0]}")
         break
 
     print(f"Mean straightness: GT = {np.mean(gt_straightnesses):.3f}, NeuralODE = {np.mean(pred_straightnesses):.3f}")
+
+    # ======================================================================
+    # 6.  EXTRA VALIDATION METRICS (paste after the previous __main__ block)
+    # ======================================================================
+    import scipy.linalg as sla
+
+
+    def gaussian_w2(mean1, cov1, mean2, cov2):
+        """
+        Closed-form W₂ distance between two Gaussians 𝒩(m1,C1) and 𝒩(m2,C2)
+        Eq. (2.6) in: Dowson & Landau 1982; or §2.2 in Peyré & Cuturi “Computational OT”.
+        Returns the *scalar* W₂ (not the square).
+        """
+        mean_term = np.sum((mean1 - mean2) ** 2)
+        # √C1
+        sqrtC1 = sla.sqrtm(cov1)
+        # Guard against tiny imaginary parts coming from numeric sqrtm
+        sqrtC1 = sqrtC1.real
+        prod = sqrtC1 @ cov2 @ sqrtC1
+        cov_term = np.trace(cov1 + cov2 - 2 * sla.sqrtm(prod).real)
+        w2_sq = mean_term + cov_term
+        return float(np.sqrt(max(w2_sq, 0.)))  # clip small <0 because of round-off
+
+
+    def mmd_rbf(X, Y, sigmas=(0.5, 1.0, 2.0, 4.0)):
+        """
+        Unbiased estimator of MMD² with mixture of RBF kernels.
+        X, Y : (N,d) numpy arrays
+        """
+        XX = torch.from_numpy(X);
+        YY = torch.from_numpy(Y)
+        N, M = XX.size(0), YY.size(0)
+        # pairwise ‖·‖²
+        XX_sq = (XX.unsqueeze(1) - XX.unsqueeze(0)).pow(2).sum(-1)
+        YY_sq = (YY.unsqueeze(1) - YY.unsqueeze(0)).pow(2).sum(-1)
+        XY_sq = (XX.unsqueeze(1) - YY.unsqueeze(0)).pow(2).sum(-1)
+
+        k = 0.
+        for s in sigmas:
+            k += torch.exp(-XX_sq / (2 * s * s)).sum() / (N * (N - 1))
+            k += torch.exp(-YY_sq / (2 * s * s)).sum() / (M * (M - 1))
+            k -= 2 * torch.exp(-XY_sq / (2 * s * s)).mean()
+        return float(np.sqrt(max(k.item(), 0.)))
+
+
+    def traj_energy(traj):  # traj : (T,d)
+        vel = np.diff(traj, axis=0)  # Δx
+        return (vel ** 2).sum() / vel.shape[0]  # mean ‖v‖²
+
+
+    # ------------------------------------------------------------------
+    print("\n────────────────  EXTRA VALIDATION  ────────────────")
+    fθ.eval()
+
+    # ---------- generate predicted end-points on the whole validation set
+    pred_ends = []
+    true_ends = []
+    energy_gt = []
+    energy_ode = []
+
+    for xb, x1b, trajb in val_loader:
+        xb = xb.to(device)
+        with torch.no_grad():
+            t_eval = torch.tensor([0., 1.], device=device)
+            x1_pred = odeint(odefunc, xb.view(-1), t_eval, method='rk4')[-1]
+        # de-normalise to raw space
+        x1_pred_raw = (x1_pred.view(-1, d).cpu().numpy()) * std + mu
+        x1_true_raw = (x1b.view(-1, d).cpu().numpy()) * std + mu
+
+        pred_ends.append(x1_pred_raw)
+        true_ends.append(x1_true_raw)
+
+        # trajectory energies ------------------------------------------------
+        trajb_raw = trajb.cpu().numpy() * std + mu
+        for i in range(trajb_raw.shape[0]):
+            energy_gt.append(traj_energy(trajb_raw[i]))
+        # predicted trajectory (coarse  N_eval = K+1 points)
+        N_eval = K + 1
+        t_line = torch.linspace(0, 1, N_eval, device=device)
+        with torch.no_grad():
+            pred_traj = odeint(odefunc, xb.view(-1), t_line, method='rk4') \
+                .cpu().numpy().reshape(N_eval, -1, d).transpose(1, 0, 2)  # (B_eval,T,d)
+        for i in range(pred_traj.shape[0]):
+            energy_ode.append(traj_energy(pred_traj[i] * std + mu))
+
+    pred_ends = np.concatenate(pred_ends, axis=0)
+    true_ends = np.concatenate(true_ends, axis=0)
+
+    # ---------------- MMD ---------------------------------------------------
+    mmd_val = mmd_rbf(pred_ends, true_ends)
+
+    # ---------------- Gaussian W₂ ------------------------------------------
+    μ_hat = pred_ends.mean(0, keepdims=True).ravel()
+    Σ_hat = np.cov(pred_ends.T)
+    μ_tgt = (true_ends.mean(0, keepdims=True)).ravel()  # should be 'a·1'
+    Σ_tgt = np.cov(true_ends.T)  # ≈I
+    w2_val = gaussian_w2(μ_hat, Σ_hat, μ_tgt, Σ_tgt)
+
+    # -------------- optional : multivariate Sinkhorn ------------------------
+    # import ot
+    # reg    = 0.05     # entropic regularisation ε
+    # a_hist = np.ones(len(pred_ends)) / len(pred_ends)
+    # b_hist = np.ones(len(true_ends)) / len(true_ends)
+    # sink_val = ot.sinkhorn2(a_hist, b_hist, pred_ends, true_ends, reg)[0]
+    # print(f"Sinkhorn²={sink_val:.4f}")
+
+    # -------------- kinetic energies ----------------------------------------
+    print(f"MMD (RBF, mixture σ)            : {mmd_val:.5f}")
+    print(f"W₂(P̂, 𝒩) (closed-form, raw)     : {w2_val:.5f}")
+    print(f"Mean energy  GT trajectories    : {np.mean(energy_gt):.4f}")
+    print(f"Mean energy  NeuralODE paths    : {np.mean(energy_ode):.4f}")
+    print("──────────────────────────────────────────────────────")
