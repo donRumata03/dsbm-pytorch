@@ -1,9 +1,3 @@
-# Train a neural ODE to shoot from x0 to x1.  With the toggle
-#    match_known_traj = True
-# the loss also forces the model to go through one *genuine* interior
-# point of the recorded trajectory instead of an artificially chosen
-# linear-interpolation point.
-
 import math, numpy as np, torch, torch.nn as nn, torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from torchdiffeq import odeint_adjoint as odeint
@@ -21,8 +15,6 @@ epochs = 20
 batch_size = 1024
 hidden = 128
 lr = 1e-3
-energy_reg = 5e-4  # λ * ∫‖f‖²dt   (set 0 to disable)
-energy_reg = 5e-1  # λ * ∫‖f‖²dt   (set 0 to disable)
 energy_reg = 0  # λ * ∫‖f‖²dt   (set 0 to disable)
 match_known_traj = True
 # ------------------------------------------------------------------
@@ -128,6 +120,9 @@ mse = nn.MSELoss()
 best = 1e9
 val = None
 
+# Track raw-space statistics per epoch
+epoch_means, epoch_vars, epoch_covs = [], [], []
+
 # ---------------------- training loop ---------------------------
 for epoch in range(1, epochs + 1):
     fθ.train()
@@ -170,20 +165,51 @@ for epoch in range(1, epochs + 1):
         opt.step()
         running += loss_main.item() * xb.size(0)
 
-    # -------------------- validation -------------------------------
+    # -------------------- validation & raw-space stats -------------------------------
     fθ.eval()
     val = 0.
+    x0_val_list, x1_pred_list = [], []
     with torch.no_grad():
         for xb, x1b, _ in val_loader:
             xb, x1b = xb.to(device), x1b.to(device)
-            x1_pred = odeint(odefunc, xb.view(-1),
-                             torch.tensor([0., 1.], device=device),
-                             method='rk4', options=dict(step_size=1. / K)
-                             )[-1].view(-1, d)
+            x1_pred = odeint(
+                odefunc,
+                xb.view(-1),
+                torch.tensor([0., 1.], device=device),
+                method='rk4',
+                options=dict(step_size=1. / K)
+            )[-1].view(-1, d)
             val += mse(x1_pred, x1b).item() * xb.size(0)
+
+            # collect raw-space trajectory endpoints for statistics
+            x0_val_list.append(xb)
+            x1_pred_list.append(x1_pred)
+
     val /= len(val_set)
 
-    print(f'E{epoch:03d} train {running / len(train_set):.3e} | val {val:.3e}')
+    # ----- raw-space stats on the whole validation set for this epoch -----
+    x0_val_n = torch.cat(x0_val_list, dim=0).cpu().numpy()   # (N_val, d)
+    x1_pred_n = torch.cat(x1_pred_list, dim=0).cpu().numpy()
+
+    x0_raw = x0_val_n * std + mu
+    x1_raw_pred = x1_pred_n * std + mu
+
+    X1_mean = x1_raw_pred.mean(axis=0)
+    X1_var = x1_raw_pred.var(axis=0, ddof=1)
+    X0c = x0_raw - x0_raw.mean(axis=0, keepdims=True)
+    X1c = x1_raw_pred - x1_raw_pred.mean(axis=0, keepdims=True)
+    Cov = (X0c.T @ X1c) / (x0_raw.shape[0] - 1)
+
+    mean_scalar = float(X1_mean.mean())              # scalar summary for mean
+    var_scalar  = float(X1_var.mean())               # scalar summary for var
+    cov_scalar  = float(np.trace(Cov) / Cov.shape[0])  # scalar summary for cov (diag-mean)
+
+    epoch_means.append(mean_scalar)
+    epoch_vars.append(var_scalar)
+    epoch_covs.append(cov_scalar)
+
+    print(f'E{epoch:03d} train {running / len(train_set):.3e} | val {val:.3e} '
+          f'| raw mean {mean_scalar:.3f} (→-1) var {var_scalar:.3f} (→1) cov {cov_scalar:.3f} (→0.65)')
 
     if val < best:
         best = val
@@ -193,6 +219,47 @@ for epoch in range(1, epochs + 1):
 print('done, best val =', best)
 print(odefunc)
 
+# Plot raw-space statistics across epochs with reference dotted lines
+import numpy as np
+import matplotlib.pyplot as plt
+
+num_epochs = len(epoch_means)
+if num_epochs == 0:
+    raise ValueError("No epoch statistics available. Run training to collect data.")
+
+epochs_axis = np.arange(1, num_epochs + 1)
+
+fig, axs = plt.subplots(1, 3, figsize=(12, 3))
+
+# Mean
+axs[0].plot(epochs_axis, epoch_means, color='C0', label='mean[x1_hat]')
+axs[0].axhline(-.1, linestyle=':', color='k', label='ref -1')
+axs[0].set_title('Mean (raw)')
+axs[0].set_xlabel('Epoch')
+axs[0].set_ylabel('Value')
+axs[0].grid(True)
+axs[0].legend(loc='best')
+
+# Variance
+axs[1].plot(epochs_axis, epoch_vars, color='C1', label='var[x1_hat]')
+axs[1].axhline(1.0, linestyle=':', color='k', label='ref 1')
+axs[1].set_title('Variance (raw)')
+axs[1].set_xlabel('Epoch')
+axs[1].grid(True)
+axs[1].legend(loc='best')
+
+# Covariance (diag-mean)
+axs[2].plot(epochs_axis, epoch_covs, color='C2', label='diag-mean Cov(x0,x1_hat)')
+axs[2].axhline(0.65, linestyle=':', color='k', label='ref 0.65')
+axs[2].set_title('Covariance diag-mean (raw)')
+axs[2].set_xlabel('Epoch')
+axs[2].grid(True)
+axs[2].legend(loc='best')
+
+plt.tight_layout()
+plt.show()
+
+
 # -------------------- 5. report (raw space) ------------------------
 sigma = (std if isinstance(std, np.ndarray) else std.cpu().numpy())
 sigma2 = (sigma ** 2).mean()  # mean variance per dim
@@ -201,7 +268,6 @@ rmse_dim = math.sqrt(mse_raw / d)
 
 print(f'Model MSE  (raw space)         : {mse_raw:.3f}')
 print(f'Model RMSE per dimension       : {rmse_dim:.3f}')
-
 
 # ———————————————————
 # --------- distribution statistics (raw space) ---------
@@ -249,6 +315,7 @@ print("  var[x1_hat]  =", v_pred)
 print("  Cov[x0, x1_hat] =\n", cov_pred)
 
 # ————————————————————————
+
 
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -386,7 +453,6 @@ if __name__ == '__main__':
             k += torch.exp(-YY_sq / (2 * s * s)).sum() / (M * (M - 1))
             k -= 2 * torch.exp(-XY_sq / (2 * s * s)).mean()
         return float(np.sqrt(max(k.item(), 0.)))
-
 
     def traj_energy(traj):  # traj : (T,d)
         vel = np.diff(traj, axis=0)  # Δx
