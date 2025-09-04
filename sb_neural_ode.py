@@ -16,6 +16,7 @@ batch_size = 1024
 hidden = 128
 lr = 1e-3
 energy_reg = 0  # λ * ∫‖f‖²dt   (set 0 to disable)
+use_sde_sampler = True
 match_known_traj = True
 # ------------------------------------------------------------------
 
@@ -114,6 +115,70 @@ class ODEFunc(nn.Module):
 
 odefunc = ODEFunc(fθ, d).to(device)
 
+
+@torch.no_grad()
+def evaluate_and_compute_stats(model_func, val_loader, mu, std, K, device, use_sde=False):
+    """
+        use_sde: Euler-Maruyama sampler or odeint.
+        
+    Returns:
+        Tuple of (validation_loss, mean_scalar, var_scalar, cov_scalar).
+    """
+    fθ = model_func.drift
+    fθ.eval()
+
+    val_loss = 0.
+    x0_raw_list, x1_pred_raw_list = [], []
+    mse_loss_fn = nn.MSELoss()
+
+    for xb, x1b, _ in val_loader:
+        xb, x1b = xb.to(device), x1b.to(device)
+
+        if use_sde:
+            # SDE Sampler (Euler-Maruyama)
+            x1_pred_n = xb.clone()
+            dt = 1.0 / K
+            sigma = 1.0
+            for i in range(K):
+                t_now = torch.full((x1_pred_n.size(0), 1), i * dt, device=device, dtype=torch.float32)
+                drift = fθ(x1_pred_n, t_now)
+                noise = torch.randn_like(x1_pred_n) * math.sqrt(dt) * sigma
+                x1_pred_n += drift * dt + noise
+        else:
+            # ODE Sampler (odeint)
+            x1_pred_n = odeint(
+                model_func,
+                xb.view(-1),
+                torch.tensor([0., 1.], device=device),
+                method='rk4',
+                options=dict(step_size=1. / K)
+            )[-1].view(-1, d)
+
+        val_loss += mse_loss_fn(x1_pred_n, x1b).item() * xb.size(0)
+
+        # De-normalize and store for metric calculation
+        x0_raw_list.append((xb.cpu().numpy() * std + mu))
+        x1_pred_raw_list.append((x1_pred_n.cpu().numpy() * std + mu))
+
+    # ----- Combine results and compute raw-space stats -----
+    x0_raw_full = np.concatenate(x0_raw_list, axis=0)
+    x1_pred_raw_full = np.concatenate(x1_pred_raw_list, axis=0)
+
+    X1_mean = x1_pred_raw_full.mean(axis=0)
+    X1_var = x1_pred_raw_full.var(axis=0, ddof=1)
+    X0c = x0_raw_full - x0_raw_full.mean(axis=0, keepdims=True)
+    X1c = x1_pred_raw_full - x1_pred_raw_full.mean(axis=0, keepdims=True)
+    Cov = (X0c.T @ X1c) / (x0_raw_full.shape[0] - 1)
+
+    mean_scalar = float(X1_mean.mean())
+    var_scalar = float(X1_var.mean())
+    cov_scalar = float(np.trace(Cov) / Cov.shape[0])
+
+    final_val_loss = val_loss / len(val_loader.dataset)
+
+    return final_val_loss, mean_scalar, var_scalar, cov_scalar
+
+
 # -------------------- optimiser & loss --------------------------
 opt = optim.AdamW(fθ.parameters(), lr=lr, betas=(0.9, 0.99), weight_decay=0.)
 mse = nn.MSELoss()
@@ -166,53 +231,21 @@ for epoch in range(1, epochs + 1):
         running += loss_main.item() * xb.size(0)
 
     # -------------------- validation & raw-space stats -------------------------------
-    fθ.eval()
-    val = 0.
-    x0_val_list, x1_pred_list = [], []
-    with torch.no_grad():
-        for xb, x1b, _ in val_loader:
-            xb, x1b = xb.to(device), x1b.to(device)
-            x1_pred = odeint(
-                odefunc,
-                xb.view(-1),
-                torch.tensor([0., 1.], device=device),
-                method='rk4',
-                options=dict(step_size=1. / K)
-            )[-1].view(-1, d)
-            val += mse(x1_pred, x1b).item() * xb.size(0)
+    # The validation loss (for saving the best model) is still based on the fast ODE sampler
+    val_loss_ode, _, _, _ = evaluate_and_compute_stats(odefunc, val_loader, mu, std, K, device, use_sde=False)
 
-            # collect raw-space trajectory endpoints for statistics
-            x0_val_list.append(xb)
-            x1_pred_list.append(x1_pred)
-
-    val /= len(val_set)
-
-    # ----- raw-space stats on the whole validation set for this epoch -----
-    x0_val_n = torch.cat(x0_val_list, dim=0).cpu().numpy()   # (N_val, d)
-    x1_pred_n = torch.cat(x1_pred_list, dim=0).cpu().numpy()
-
-    x0_raw = x0_val_n * std + mu
-    x1_raw_pred = x1_pred_n * std + mu
-
-    X1_mean = x1_raw_pred.mean(axis=0)
-    X1_var = x1_raw_pred.var(axis=0, ddof=1)
-    X0c = x0_raw - x0_raw.mean(axis=0, keepdims=True)
-    X1c = x1_raw_pred - x1_raw_pred.mean(axis=0, keepdims=True)
-    Cov = (X0c.T @ X1c) / (x0_raw.shape[0] - 1)
-
-    mean_scalar = float(X1_mean.mean())              # scalar summary for mean
-    var_scalar  = float(X1_var.mean())               # scalar summary for var
-    cov_scalar  = float(np.trace(Cov) / Cov.shape[0])  # scalar summary for cov (diag-mean)
+    # But the stats for plotting are now correctly calculated using the SDE sampler
+    _, mean_scalar, var_scalar, cov_scalar = evaluate_and_compute_stats(odefunc, val_loader, mu, std, K, device, use_sde=True)
 
     epoch_means.append(mean_scalar)
     epoch_vars.append(var_scalar)
     epoch_covs.append(cov_scalar)
 
-    print(f'E{epoch:03d} train {running / len(train_set):.3e} | val {val:.3e} '
-          f'| raw mean {mean_scalar:.3f} (→-1) var {var_scalar:.3f} (→1) cov {cov_scalar:.3f} (→0.65)')
+    print(f'E{epoch:03d} train {running / len(train_set):.3e} | val {val_loss_ode:.3e} '
+          f'| SDE stats: mean {mean_scalar:.3f} (→-0.1) var {var_scalar:.3f} (→1) cov {cov_scalar:.3f} (→0.62)')
 
-    if val < best:
-        best = val
+    if val_loss_ode < best:
+        best = val_loss_ode
         torch.save({'state': fθ.state_dict(), 'mu': mu, 'std': std}, ckpt_path)
         print(f'  ↳ saved (best={best:.3e})')
 
@@ -259,7 +292,6 @@ axs[2].legend(loc='best')
 plt.tight_layout()
 plt.show()
 
-
 # -------------------- 5. report (raw space) ------------------------
 sigma = (std if isinstance(std, np.ndarray) else std.cpu().numpy())
 sigma2 = (sigma ** 2).mean()  # mean variance per dim
@@ -282,15 +314,30 @@ fθ.eval()
 # integrate from x0 (normalized) to get predicted x1, then de-normalize to raw space
 with torch.no_grad():
     x0n_all = torch.tensor(x0_n, dtype=torch.float32, device=device)
-    x1n_pred = odeint(
-        odefunc,
-        x0n_all.view(-1),
-        torch.tensor([0., 1.], device=device),
-        method='rk4',
-        options=dict(step_size=1. / K)
-    )[-1].view(-1, d)
+
+    if use_sde_sampler:
+        print("\nUsing SDE Sampler (Euler-Maruyama) for evaluation...")
+        x1n_pred = x0n_all.clone()
+        dt = 1.0 / K
+        sigma = 1.0  # As specified in the original problem config
+
+        for i in range(K):
+            t_now = torch.full((x1n_pred.size(0), 1), i * dt, device=device, dtype=torch.float32)
+            drift = fθ(x1n_pred, t_now)
+            noise = torch.randn_like(x1n_pred) * math.sqrt(dt) * sigma
+            x1n_pred += drift * dt + noise
+    else:
+        print("\nUsing ODE Sampler (odeint) for evaluation...")
+        x1n_pred = odeint(
+            odefunc,
+            x0n_all.view(-1),
+            torch.tensor([0., 1.], device=device),
+            method='rk4',
+            options=dict(step_size=1. / K)
+        )[-1].view(-1, d)
 
 x1_pred = x1n_pred.cpu().numpy() * std + mu  # back to raw
+
 
 def compute_stats(X0, X1):
     mean_x1 = X1.mean(axis=0)
@@ -299,6 +346,7 @@ def compute_stats(X0, X1):
     X1c = X1 - X1.mean(axis=0, keepdims=True)
     cov_x0x1 = (X0c.T @ X1c) / (X0.shape[0] - 1)
     return mean_x1, var_x1, cov_x0x1
+
 
 m_true, v_true, cov_true = compute_stats(x0, x1)
 m_pred, v_pred, cov_pred = compute_stats(x0, x1_pred)
@@ -453,6 +501,7 @@ if __name__ == '__main__':
             k += torch.exp(-YY_sq / (2 * s * s)).sum() / (M * (M - 1))
             k -= 2 * torch.exp(-XY_sq / (2 * s * s)).mean()
         return float(np.sqrt(max(k.item(), 0.)))
+
 
     def traj_energy(traj):  # traj : (T,d)
         vel = np.diff(traj, axis=0)  # Δx
