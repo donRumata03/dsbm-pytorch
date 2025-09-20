@@ -75,19 +75,23 @@ def build_feature_library(library: str) -> Tuple[Any, Optional[List[TimeFeature]
         col = _as_column(t).reshape(-1)
         return np.cos(np.pi * col)
 
-    time_functions: List[TimeFeature] = [ones, identity, squared, one_minus, one_minus_squared, sin_pi, cos_pi]
+    time_functions: List[TimeFeature] = [ones, identity,
+                                         # squared,
+                                         one_minus, one_minus_squared,
+                                         # sin_pi, cos_pi
+                                         ]
     time_names = [
         lambda _: "1",
         lambda _: "t",
-        lambda _: "t^2",
+        # lambda _: "t^2",
         lambda _: "1-t",
         lambda _: "(1-t)^2",
-        lambda _: "sin(pi t)",
-        lambda _: "cos(pi t)",
+        # lambda _: "sin(pi t)",
+        # lambda _: "cos(pi t)",
     ]
 
     time_library = ps.CustomLibrary(time_functions, function_names=time_names)
-    state_library = ps.PolynomialLibrary(degree=3, include_bias=True)
+    state_library = ps.PolynomialLibrary(degree=1, include_bias=True)
     generalized = ps.GeneralizedLibrary([state_library, time_library])
     return generalized, time_functions
 
@@ -98,7 +102,7 @@ class SINDyFMConfig(GaussianTransportConfig):
     library: str = "rich"
     optimizer_alpha: float = 1e-3
     optimizer_threshold: float = 1e-4
-    optimizer_max_iter: int = 20
+    optimizer_max_iter: int = 300
     n_validation: int = 65536
 
 
